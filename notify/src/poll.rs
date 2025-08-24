@@ -354,6 +354,9 @@ mod data {
 
         /// Checked time.
         last_check: Instant,
+
+        /// Type of object in path.
+        object_kind: fs::FileType,
     }
 
     impl PathData {
@@ -372,6 +375,7 @@ mod data {
                     }),
 
                 last_check: data_builder.now,
+                object_kind: metadata.file_type(),
             }
         }
 
@@ -416,8 +420,36 @@ mod data {
                         None
                     }
                 }
-                (None, Some(_new)) => Some(EventKind::Create(CreateKind::Any)),
-                (Some(_old), None) => Some(EventKind::Remove(RemoveKind::Any)),
+                (None, Some(_new)) => {
+
+                    if _new.object_kind.is_file() {
+                        Some(EventKind::Create(CreateKind::File))
+                    }
+                    else if _new.object_kind.is_dir() {
+                        Some(EventKind::Create(CreateKind::Folder))
+                    }
+                    else if _new.object_kind.is_symlink() {
+                        Some(EventKind::Create(CreateKind::Other))
+                    }
+                    else {
+                        Some(EventKind::Create(CreateKind::Any))
+                    }
+                },
+                (Some(_old), None) => {
+
+                    if _old.object_kind.is_file() {
+                        Some(EventKind::Remove(RemoveKind::File))
+                    }
+                    else if _old.object_kind.is_dir() {
+                        Some(EventKind::Remove(RemoveKind::Folder))
+                    }
+                    else if _old.object_kind.is_symlink() {
+                        Some(EventKind::Remove(RemoveKind::Other))
+                    }
+                    else {
+                        Some(EventKind::Remove(RemoveKind::Any))
+                    }
+                },
                 (None, None) => None,
             }
             .map(|event_kind| Event::new(event_kind).add_path(path.into()))
