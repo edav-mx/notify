@@ -17,22 +17,38 @@ _Cross-platform filesystem notification library for Rust._
 - [File ID][file-id-docs]
 - [Examples][examples]
 - [Changelog][changelog]
-- [Upgrading notify from v4](UPGRADING_V4_TO_V5.md)
-- Minimum supported Rust version: **1.77**
+- [Upgrading notify from v8](./docs/UPGRADING_V8_TO_V9.md)
+- [Upgrading notify from v4](./docs/UPGRADING_V4_TO_V5.md)
+- Minimum supported Rust version: **1.88**
 
 As used by: [alacritty], [cargo watch], [cobalt], [deno], [docket], [mdBook],
-[rust-analyzer], [watchexec], [watchfiles], [xi-editor],
+[rust-analyzer], [watchexec], [watchfiles], [xi-editor], [zed]
 and others.
 
 (Looking for desktop notifications instead? Have a look at [notify-rust] or
 [alert-after]!)
 
+## Minimum Supported Rust Version (MSRV) Policy
+
+We follow these MSRV rules:
+
+- The current MSRV is **1.88**.
+- MSRV bumps do NOT require a major release and may happen in minor releases.
+- The MSRV may be updated when needed, but support for the current stable Rust release and the previous two stable releases (N, N-1, N-2) is always guaranteed.
+  - For example, if the current stable version is 1.85, we guarantee support for 1.85, 1.84, and 1.83, so the minimum supported Rust version will be **at most** 1.83.
+- MSRV is bumped only when needed, e.g.:
+  - required by dependencies
+  - any serious bug is found (including security-related)
+  - adopting new stable Rust features
+- Every MSRV bump is documented in the release notes when it happens.
+
 ## Platforms
 
 - Linux / Android: inotify
-- macOS: FSEvents or kqueue, see features
+- FreeBSD: inotify when built natively on 15.0+; kqueue otherwise (use `freebsd_inotify` for cross-builds)
+- macOS: FSEvents (default) or kqueue, see features
 - Windows: ReadDirectoryChangesW
-- iOS / FreeBSD / NetBSD / OpenBSD / DragonflyBSD: kqueue
+- iOS / NetBSD / OpenBSD / DragonflyBSD: kqueue
 - All platforms: polling
 
 ## License
@@ -71,7 +87,7 @@ Originally created by [Félix Saparelli] and awesome [contributors].
 [deno]: https://github.com/denoland/deno
 [docket]: https://iwillspeak.github.io/docket/
 [notify-docs]: https://docs.rs/notify/latest/notify/
-[notify-types-docs]: https://docs.rs/notify-types/latest/notify-types/
+[notify-types-docs]: https://docs.rs/notify-types/
 [file-id-docs]: https://docs.rs/file-id/latest/file_id/
 [fsnotify]: https://github.com/fsnotify/fsnotify
 [handlebars-iron]: https://github.com/sunng87/handlebars-iron
@@ -84,4 +100,5 @@ Originally created by [Félix Saparelli] and awesome [contributors].
 [wiki]: https://github.com/notify-rs/notify/wiki
 [xi-editor]: https://xi-editor.io/
 [watchfiles]: https://watchfiles.helpmanual.io/
+[zed]: https://github.com/zed-industries/zed
 [examples]: examples/
