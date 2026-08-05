@@ -43,14 +43,16 @@
 //!
 //! # Features
 //!
-//! The following crate features can be turned on or off in your cargo dependency config:
+//! The following crate features can be configured in your Cargo dependency:
 //!
-//! - `serde` passed down to notify-types, off by default
-//! - `crossbeam-channel` passed down to notify, off by default
-//! - `flume` passed down to notify, off by default
-//! - `macos_fsevent` passed down to notify, off by default
-//! - `macos_kqueue` passed down to notify, off by default
-//! - `serialization-compat-6` passed down to notify, off by default
+//! - `macos_fsevent` (default) enables notify's FSEvents backend on macOS
+//! - `freebsd_inotify` enables notify's inotify backend on FreeBSD 15+
+//!   - inotify is automatically enabled when built natively, this feature is only needed for cross-compilation
+//! - `macos_kqueue` enables notify's kqueue backend on macOS
+//! - `serde` enables serialization support in notify-types
+//! - `crossbeam-channel`, `flume`, `futures`, and `tokio` enable the corresponding
+//!   channel senders as event handlers
+//! - `serialization-compat-6` restores notify 6 serialization behavior
 //!
 //! # Caveats
 //!
@@ -127,6 +129,7 @@ impl Config {
     /// Set timeout
     ///
     /// Timeout is the amount of time after which a debounced event is emitted or a continuous event is send, if there still are events incoming for the specific path.
+    #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
@@ -135,11 +138,13 @@ impl Config {
     ///
     /// When `batch_mode` is enabled, events may be delayed (at most 2x the specified timeout) and delivered with others.
     /// If disabled, all events are delivered immediately when their debounce timeout is reached.
+    #[must_use]
     pub fn with_batch_mode(mut self, batch_mode: bool) -> Self {
         self.batch_mode = batch_mode;
         self
     }
     /// Set [`notify::Config`] for the backend
+    #[must_use]
     pub fn with_notify_config(mut self, notify_config: notify::Config) -> Self {
         self.notify_config = notify_config;
         self
@@ -164,6 +169,20 @@ impl DebounceEventHandler for crossbeam_channel::Sender<DebounceEventResult> {
 
 #[cfg(feature = "flume")]
 impl DebounceEventHandler for flume::Sender<DebounceEventResult> {
+    fn handle_event(&mut self, event: DebounceEventResult) {
+        let _ = self.send(event);
+    }
+}
+
+#[cfg(feature = "futures")]
+impl DebounceEventHandler for futures::channel::mpsc::UnboundedSender<DebounceEventResult> {
+    fn handle_event(&mut self, event: DebounceEventResult) {
+        let _ = self.unbounded_send(event);
+    }
+}
+
+#[cfg(feature = "tokio")]
+impl DebounceEventHandler for tokio::sync::mpsc::UnboundedSender<DebounceEventResult> {
     fn handle_event(&mut self, event: DebounceEventResult) {
         let _ = self.send(event);
     }
@@ -452,5 +471,51 @@ mod tests {
         }
 
         panic!("did not receive expected event");
+    }
+
+    #[cfg(feature = "futures")]
+    #[tokio::test]
+    async fn futures_unbounded_sender_as_handler() {
+        use futures::StreamExt;
+
+        let dir = tempdir().unwrap();
+
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        let mut debouncer = new_debouncer(Duration::from_secs(1), tx).unwrap();
+        debouncer
+            .watcher
+            .watch(dir.path(), RecursiveMode::Recursive)
+            .unwrap();
+
+        let file_path = dir.path().join("file.txt");
+        fs::write(&file_path, b"Lorem ipsum").unwrap();
+
+        tokio::time::timeout(Duration::from_secs(10), rx.next())
+            .await
+            .expect("timeout")
+            .expect("No event")
+            .expect("error");
+    }
+
+    #[cfg(feature = "tokio")]
+    #[tokio::test]
+    async fn tokio_unbounded_sender_as_handler() {
+        let dir = tempdir().unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut debouncer = new_debouncer(Duration::from_secs(1), tx).unwrap();
+        debouncer
+            .watcher
+            .watch(dir.path(), RecursiveMode::Recursive)
+            .unwrap();
+
+        let file_path = dir.path().join("file.txt");
+        fs::write(&file_path, b"Lorem ipsum").unwrap();
+
+        tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("No event")
+            .expect("error");
     }
 }
