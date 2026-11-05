@@ -1,6 +1,6 @@
 [package]
 name = "notify-debouncer-mini"
-version = "0.7.0"
+version = "0.8.0-rc.1"
 description = "notify mini debouncer for events"
 documentation = "https://docs.rs/notify-debouncer-mini"
 authors = ["Aron Heinecke <Ox0p54r36@t-online.de>"]
@@ -11,6 +11,10 @@ rust-version.workspace = true
 edition.workspace = true
 homepage.workspace = true
 repository.workspace = true
+
+[package.metadata.docs.rs]
+features = ["crossbeam-channel", "flume", "futures", "serde", "tokio"]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["macos_fsevent"]

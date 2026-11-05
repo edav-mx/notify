@@ -27,7 +27,7 @@ impl RecursiveMode {
 
 /// Controls how path separators are represented in emitted event paths on Windows.
 ///
-/// This applies to [`ReadDirectoryChangesWatcher`](crate::ReadDirectoryChangesWatcher).
+/// This applies to `ReadDirectoryChangesWatcher`.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default)]
 pub enum WindowsPathSeparatorStyle {
     /// Infer separator style from each watched input path.
@@ -74,6 +74,9 @@ pub struct Config {
     /// See [Config::with_windows_path_separator_style]
     windows_path_separator_style: WindowsPathSeparatorStyle,
 
+    /// See [Config::with_windows_extended_information]
+    windows_extended_information: bool,
+
     /// See [Config::with_fsevent_latency]
     fsevent_latency: Duration,
 }
@@ -89,7 +92,6 @@ impl Config {
     /// This will enable automatic polling, overwriting [`with_manual_polling()`](Config::with_manual_polling).
     #[must_use]
     pub fn with_poll_interval(mut self, dur: Duration) -> Self {
-        // TODO: v7.0 break signature to option
         self.poll_interval = Some(dur);
         self
     }
@@ -97,7 +99,6 @@ impl Config {
     /// Returns current setting
     #[must_use]
     pub fn poll_interval(&self) -> Option<Duration> {
-        // Changed Signature to Option
         self.poll_interval
     }
 
@@ -134,8 +135,7 @@ impl Config {
         self.compare_contents
     }
 
-    /// For the [INotifyWatcher](crate::INotifyWatcher), [KqueueWatcher](crate::KqueueWatcher),
-    /// and [PollWatcher](crate::PollWatcher).
+    /// For the `INotifyWatcher`, `KqueueWatcher`, and [`PollWatcher`](crate::PollWatcher).
     ///
     /// Determine if symbolic links should be followed when recursively watching a directory.
     ///
@@ -190,7 +190,7 @@ impl Config {
         self.event_kinds
     }
 
-    /// For the [`ReadDirectoryChangesWatcher`](crate::ReadDirectoryChangesWatcher) backend.
+    /// For the `ReadDirectoryChangesWatcher` backend.
     ///
     /// Controls path separator normalization for emitted event paths on Windows.
     ///
@@ -210,7 +210,29 @@ impl Config {
         self.windows_path_separator_style
     }
 
-    /// For the [`FsEventWatcher`](crate::FsEventWatcher) backend.
+    /// Use `ReadDirectoryChangesExW` to classify created and removed entries as files or folders.
+    /// Reparse points are not followed; modification events remain `ModifyKind::Any`.
+    ///
+    /// Requires Windows 10 1709 / Windows Server 2019 or later and NTFS. Unsupported APIs
+    /// fail at construction; unsupported filesystems fail at `watch()` or via the event handler.
+    /// No automatic fallback: use a default-configured watcher for unsupported paths.
+    ///
+    /// Off by default and ignored by other backends. Cannot be changed via
+    /// [`Watcher::configure`](crate::Watcher::configure); create a new watcher to switch modes.
+    /// Uses a 64 KiB read buffer instead of 16 KiB.
+    #[must_use]
+    pub fn with_windows_extended_information(mut self, extended_information: bool) -> Self {
+        self.windows_extended_information = extended_information;
+        self
+    }
+
+    /// Returns whether extended directory notifications are enabled on Windows.
+    #[must_use]
+    pub fn windows_extended_information(&self) -> bool {
+        self.windows_extended_information
+    }
+
+    /// For the `FsEventWatcher` backend.
     ///
     /// The latency passed to `FSEventStreamCreate`: how long the FSEvents service waits
     /// after hearing about an event from the kernel before invoking the callback. A larger
@@ -245,6 +267,7 @@ impl Default for Config {
             follow_symlinks: true,
             event_kinds: EventKindMask::ALL,
             windows_path_separator_style: WindowsPathSeparatorStyle::Auto,
+            windows_extended_information: false,
             fsevent_latency: Duration::ZERO,
         }
     }
@@ -258,6 +281,7 @@ impl Default for Config {
 pub struct WatchPathConfig {
     recursive_mode: RecursiveMode,
     dereference_symlinks: bool,
+    user_data: Option<u64>,
 }
 
 impl WatchPathConfig {
@@ -267,6 +291,7 @@ impl WatchPathConfig {
         Self {
             recursive_mode,
             dereference_symlinks: true,
+            user_data: None,
         }
     }
 
@@ -284,7 +309,7 @@ impl WatchPathConfig {
     }
 
     /// Set whether a symbolic link is followed to its destination, for
-    /// [`RecursiveMode::NonRecursive`] watches on the [INotifyWatcher](crate::INotifyWatcher)
+    /// [`RecursiveMode::NonRecursive`] watches on the `INotifyWatcher`.
     #[must_use]
     pub fn with_dereference_symlinks(mut self, dereference_symlinks: bool) -> Self {
         self.dereference_symlinks = dereference_symlinks;
@@ -296,11 +321,47 @@ impl WatchPathConfig {
     pub fn dereference_symlinks(&self) -> bool {
         self.dereference_symlinks
     }
+
+    /// Attaches an application-defined value to events and errors from this watch.
+    ///
+    /// All built-in backends expose it through [`Event::user_data`](crate::Event::user_data)
+    /// and [`Error::user_data`](crate::Error::user_data).
+    /// Recursive descendants inherit the value; explicitly registered watches keep their own.
+    /// Rewatching replaces it, and [`Watcher::watch`](crate::Watcher::watch) resets it to `None`.
+    ///
+    /// ```no_run
+    /// use notify::{Event, RecursiveMode, Result, WatchPathConfig, Watcher};
+    /// use std::path::Path;
+    ///
+    /// # fn main() -> Result<()> {
+    /// let mut watcher = notify::recommended_watcher(|result: Result<Event>| {
+    ///     if let Ok(event) = result {
+    ///         println!("watch {:?}: {:?}", event.user_data(), event.paths);
+    ///     }
+    /// })?;
+    /// watcher.watch_with(
+    ///     Path::new("src"),
+    ///     WatchPathConfig::new(RecursiveMode::Recursive).with_user_data(42),
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn with_user_data(mut self, user_data: u64) -> Self {
+        self.user_data = Some(user_data);
+        self
+    }
+
+    /// Returns the value attached to this watch, or `None` if none was set.
+    #[must_use]
+    pub fn user_data(&self) -> Option<u64> {
+        self.user_data
+    }
 }
 
 /// An operation to apply to a watcher
 ///
-/// See [`Watcher::update_paths`] for more information
+/// See [`Watcher::update_paths`](crate::Watcher::update_paths) for more information.
 #[derive(Debug)]
 pub enum PathOp {
     /// Path should be watched

@@ -2,6 +2,81 @@
 
 ## unreleased
 
+- CHANGE: raise MSRV to 1.91
+- FEATURE: add `Error::user_data()` and `Error::set_user_data()` to identify watch operations and watches reporting errors; failed batch watch operations retain the value in `UpdatePathsError.source` [#388]
+- CHANGE: `Error` now has a private field. Construct errors with its constructors and include `..` when destructuring them. Its Debug output now includes `user_data` **breaking**
+- FEATURE: add per-watch `WatchPathConfig::with_user_data(u64)` and expose it through `Event::user_data()` on all backends; inotify and kqueue update value-only changes without reinstalling watches [#1012]
+- DOCS: describe kqueue event-detail limitations and FSEvents event translation
+- FIX: [poll] recover a poisoned watch mutex in `watched_paths`, consistently with watch, unwatch, and polling
+- FEATURE: [Windows] add opt-in `Config::with_windows_extended_information` to classify created and removed entries from `ReadDirectoryChangesExW` attributes, using 64 KiB buffers; unsupported APIs and filesystems return errors without automatic fallback [#261]
+- FIX: [Windows] deliver previously log-only fatal asynchronous read errors to the event handler in both notification modes; `ERROR_ACCESS_DENIED` retains its existing deletion check and rearm behavior
+- FIX: [Windows] bound notification decoding by the received byte count in both modes; malformed records emit an `InvalidData` error and a rescan event
+- CHANGE: mark `ErrorKind` and `UpdatePathsError` as `#[non_exhaustive]`; match error kinds with a wildcard arm, construct batch errors with the new `UpdatePathsError::new`, and include `..` when destructuring them **breaking**
+- FIX: [kqueue] skip special files and links to them during recursive watch registration and event-triggered additions, avoiding blocking opens of FIFOs; reject explicitly watched special files with an `Unsupported` I/O error
+- FIX: [kqueue] report child errors and continue recursive watches; preserve errors for the requested root and report failures during event-triggered additions [#703]
+- FIX: [kqueue] report process and system file descriptor limits as `ErrorKind::MaxFilesWatch` and stop further additions in that request or event batch [#455] [#596]
+- CHANGE: [kqueue] skip missing-path errors when a watched directory disappears during write-event processing
+- DOCS: explain partial recursive kqueue coverage and file descriptor limits, and recommend FSEvents for large trees on macOS
+- PERF: [Windows] wait for the wakeup semaphore without a timeout, so an idle watcher no longer wakes 10 times a second; `Watcher::configure` now wakes the server instead of waiting for the timeout, and the semaphore stays open until both the watcher and the server are done with it
+- FIX: [inotify] report a symbolic link in a new directory that points to a directory above it as a loop, instead of watching the tree a second time below the link
+
+[#703]: https://github.com/notify-rs/notify/issues/703
+[#388]: https://github.com/notify-rs/notify/issues/388
+[#1012]: https://github.com/notify-rs/notify/issues/1012
+[#455]: https://github.com/notify-rs/notify/issues/455
+[#596]: https://github.com/notify-rs/notify/issues/596
+[#261]: https://github.com/notify-rs/notify/issues/261
+
+## notify 9.0.0-rc.7 (2026-10-28)
+
+- FIX: [inotify] report newly created subdirectories found while extending a recursive watch, including nested directories created before their watches were installed; this recovery covers directories only [#727]
+- FIX: [macOS] preserve pending FSEvents across stream rebuilds when watches are added, removed, or updated in a batch [#993]
+- PERF: [macOS] keep the FSEvents stream running when rewatching an unchanged path, removing a covered watch, or applying a batch with unchanged stream roots [#1033]
+- FIX: [inotify] remove every path of a deleted directory or file that two paths share through a symlink or a hard link, so `watched_paths` no longer lists it [#1038]
+- FIX: [inotify] keep watching a directory below a deleted root that a symlink from outside the root still reaches [#1038]
+- PERF: [inotify] batch `Watcher::update_paths` operations and skip redundant metadata reads when adding non-recursive watches [#1041]
+- FIX: [Windows] finish stopping a watch before releasing its handles: release the wakeup semaphore before sending `Stop`, and close the directory handle and completion semaphore only after the pending read has completed (leaked if `CancelIo` fails) [#1051]
+- DEPS: upgrade `notify-types` to 2.2.0 [#1032]
+- DOCS: clarify WSL2 notification limitations, watching files replaced by editors, and backend behavior when watched paths are renamed, moved, or deleted [#1048] [#1053]
+
+[#727]: https://github.com/notify-rs/notify/issues/727
+[#993]: https://github.com/notify-rs/notify/issues/993
+[#1032]: https://github.com/notify-rs/notify/pull/1032
+[#1033]: https://github.com/notify-rs/notify/pull/1033
+[#1038]: https://github.com/notify-rs/notify/pull/1038
+[#1041]: https://github.com/notify-rs/notify/pull/1041
+[#1048]: https://github.com/notify-rs/notify/pull/1048
+[#1051]: https://github.com/notify-rs/notify/issues/1051
+[#1053]: https://github.com/notify-rs/notify/pull/1053
+
+## notify 9.0.0-rc.6 (2026-10-17)
+
+- FIX: [macOS] prevent intermittent hangs during rapid watch/unwatch sequences with `FsEventWatcher` [#1013]
+- FIX: [poll] return an error from `watch` when the path does not exist instead of failing silently, matching the other backends [#998]
+- FIX: [poll] detect subsecond symlink mtime changes when symlink following is disabled, with or without content comparison [#1004]
+- PERF: [macOS] avoid restarting the FSEvents stream when adding or updating a watch covered by a recursive ancestor on the same volume; document `Watcher::update_paths` for bulk registration [#988]
+- FIX: [Windows] return `Error::watch_not_found` from `unwatch` when the path is not watched instead of succeeding silently, matching the other backends [#1014]
+- PERF: [macOS] find an event's watch by hash, not by scanning [#1022]
+- FIX: [kqueue] keep a non-recursive watch non-recursive when a subdirectory is created or removed in it, and watch every new entry in a recursively watched directory, including files removed and recreated in the same batch [#1025]
+- FIX: [kqueue] register watches added before a recursive walk fails, and skip child entries that disappear during the walk [#1017]
+- FIX: [macOS] deliver FSEvents recovery notifications reported at an ancestor of a watched path as rescan events [#1021]
+- FIX: [inotify] never abandon a recursive watch, report what failed instead [#970]
+- FIX: [inotify] report the directories a recursive watch could not walk into, rather than leaving their subtrees silently unwatched [#970]
+- PERF: [inotify, kqueue] avoid scanning all watches for each entry during recursive watch registration while preserving event path representations for nested watches [#986]
+- PERF: [kqueue] watch new directory entries without rewalking the entire watched subtree [#1025]
+
+[#970]: https://github.com/notify-rs/notify/pull/970
+[#986]: https://github.com/notify-rs/notify/pull/986
+[#998]: https://github.com/notify-rs/notify/issues/998
+[#988]: https://github.com/notify-rs/notify/issues/988
+[#1004]: https://github.com/notify-rs/notify/pull/1004
+[#1013]: https://github.com/notify-rs/notify/pull/1013
+[#1014]: https://github.com/notify-rs/notify/issues/1014
+[#1017]: https://github.com/notify-rs/notify/pull/1017
+[#1021]: https://github.com/notify-rs/notify/pull/1021
+[#1022]: https://github.com/notify-rs/notify/issues/1022
+[#1025]: https://github.com/notify-rs/notify/pull/1025
+
 ## notify 9.0.0-rc.5 (2026-08-30)
 
 - CHANGE: update to edition 2024
@@ -538,7 +613,7 @@ _(no changes, just a new release because the old one failed to publish properly)
 
 ## 4.0.7 (2019-01-23)
 
-- DOCS: Document unexpected behaviour around watching a tree root. [#165], [#166]
+- DOCS: Document unexpected behavior around watching a tree root. [#165], [#166]
 - DOCS: Remove v2 documentation. [`8310b2cc`]
 - TESTS: Change how tests are skipped. [`0b4c8400`]
 - DOCS: Add timetrack to Readme showcase. [#167]

@@ -1,3 +1,5 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 pub mod debouncer_full;
 pub mod debouncer_mini;
 pub mod event;
@@ -30,6 +32,7 @@ mod tests {
         assert_debug_impl!(event::EventKind);
         assert_debug_impl!(event::EventKindMask);
         assert_debug_impl!(debouncer_mini::DebouncedEvent);
+        assert_debug_impl!(debouncer_mini::DebouncedEventBatch);
         assert_debug_impl!(debouncer_mini::DebouncedEventKind);
         assert_debug_impl!(debouncer_full::DebouncedEvent);
     }

@@ -1,6 +1,6 @@
 [package]
 name = "notify"
-version = "9.0.0-rc.5"
+version = "9.0.0-rc.7"
 description = "Cross-platform filesystem notification library"
 documentation = "https://docs.rs/notify"
 readme = "../README.md"
@@ -16,6 +16,11 @@ rust-version.workspace = true
 edition.workspace = true
 homepage.workspace = true
 repository.workspace = true
+
+[package.metadata.docs.rs]
+# Enabling macos_kqueue would hide the default FSEvents backend.
+features = ["crossbeam-channel", "flume", "futures", "serde", "tokio"]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["macos_fsevent"]
@@ -70,6 +75,7 @@ windows-sys = { workspace = true, features = [
   "Win32_Security",
   "Win32_System_WindowsProgramming",
   "Win32_System_IO",
+  "Win32_System_LibraryLoader",
 ] }
 
 # Both backends must be available for build-time selection.

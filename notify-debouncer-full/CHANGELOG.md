@@ -2,7 +2,17 @@
 
 ## unreleased
 
+- CHANGE: raise MSRV to 1.91
+- PERF: avoid scanning unrelated event queues and cached file IDs when removing a path
+- CHANGE: remove the deprecated no-op methods `Debouncer::watcher` and `Debouncer::cache` **breaking**
+- FIX: for an event on a direct child of a non-recursive watch, cache only that entry and not the entries below it, which the watch does not report
+- CHANGE: `FileIdCache::add_single_path` is a required method, and `FileIdCache::add_path` is a provided method that walks the path and calls `add_single_path` for each entry; a custom cache only has to cache single paths **breaking**
+- FIX: pair the source and the destination of a rename below the same root when the watcher reports the rename once for each watch, for example for two watches that reach one directory through a symlink
+- FIX: pair the source and the destination of a rename by file ID only when one of them has no tracker, so a later move-in is no longer reported as a rename of a file that an earlier rename moved
+- FIX: unwatching a path no longer deregisters roots nested under it, and re-fingerprints the nested roots whose cached IDs the removal dropped
+- FIX: if the watcher fails to construct, `new_debouncer_opt` no longer leaks the debouncer thread or the event handler [#1040]
 - PERF: park the debouncer thread to avoid idle polling [#933]
+- CHANGE: `FileIdCache::rescan` takes `&[WatchRoot]` instead of `&[(PathBuf, RecursiveMode)]`; `WatchRoot` is `#[non_exhaustive]`, provides `WatchRoot::new`, and requires `..` when destructuring **breaking**
 
 [#933]: https://github.com/notify-rs/notify/pull/933
 
@@ -14,6 +24,7 @@
 
 [#900]: https://github.com/notify-rs/notify/issues/900
 [#913]: https://github.com/notify-rs/notify/pull/913
+[#1040]: https://github.com/notify-rs/notify/issues/1040
 
 ## debouncer-full 0.8.0-rc.1 (2026-04-16)
 

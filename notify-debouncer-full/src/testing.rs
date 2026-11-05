@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use file_id::FileId;
@@ -13,7 +13,7 @@ use notify::{
     },
 };
 
-use crate::{DebounceDataInner, DebouncedEvent, FileIdCache, Queue};
+use crate::{DebounceDataInner, DebouncedEvent, FileIdCache, Queue, time::Instant};
 
 pub(crate) use schema::TestCase;
 
@@ -255,11 +255,15 @@ impl schema::State {
 
         let cache = TestCache::new(cache, file_system);
 
-        let rename_event = self.rename_event.map(|e| {
-            let file_id = e.file_id.map(|id| FileId::new_inode(id, id));
-            let event = e.into_debounced_event(time, None);
-            (event, file_id)
-        });
+        let rename_events = self
+            .rename_event
+            .into_iter()
+            .map(|e| {
+                let file_id = e.file_id.map(|id| FileId::new_inode(id, id));
+                let event = e.into_debounced_event(time, None);
+                (event, file_id)
+            })
+            .collect();
 
         let rescan_event = self
             .rescan_event
@@ -269,7 +273,8 @@ impl schema::State {
             queues,
             roots: VecDeque::new(),
             cache,
-            rename_event,
+            rename_events,
+            pending_rename_destinations: Vec::new(),
             rescan_event,
             errors: Vec::new(),
             timeout: Duration::from_millis(self.timeout.unwrap_or(50)),
@@ -301,6 +306,12 @@ impl FileIdCache for TestCache {
             {
                 self.paths.insert(file_path.clone(), *file_id);
             }
+        }
+    }
+
+    fn add_single_path(&mut self, path: &Path) {
+        if let Some(file_id) = self.file_system.get(path) {
+            self.paths.insert(path.to_path_buf(), *file_id);
         }
     }
 

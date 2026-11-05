@@ -152,7 +152,7 @@ mod data {
             root: WatchPath,
             is_recursive: bool,
             follow_symlinks: bool,
-        ) -> Option<WatchData> {
+        ) -> crate::Result<WatchData> {
             WatchData::new(self, root, is_recursive, follow_symlinks)
         }
 
@@ -176,6 +176,7 @@ mod data {
         // config part, won't change.
         root: PathBuf,
         requested_root: PathBuf,
+        user_data: Option<u64>,
         is_recursive: bool,
         follow_symlinks: bool,
 
@@ -194,43 +195,34 @@ mod data {
             root: WatchPath,
             is_recursive: bool,
             follow_symlinks: bool,
-        ) -> Option<Self> {
-            // If metadata read error at `root` path, it will emit
-            // a error event and stop to create the whole `WatchData`.
+        ) -> crate::Result<Self> {
+            // Creating a watch on a path that cannot be stat-ed (e.g. because it
+            // does not exist) fails the `poll_watcher.watch(root, ..)` call, so
+            // the error is reported to the caller instead of silently skipping
+            // the path. `Error::io_watch` maps `io::ErrorKind::NotFound` to
+            // `ErrorKind::PathNotFound`, matching the other backends.
             //
-            // QUESTION: inconsistent?
-            //
-            // When user try to *CREATE* a watch by `poll_watcher.watch(root, ..)`,
-            // if `root` path hit an io error, then watcher will reject to
-            // create this new watch.
-            //
-            // This may inconsistent with *POLLING* a watch. When watcher
-            // continue polling, io error at root path will not delete
-            // a existing watch. polling still working.
-            //
-            // So, consider a config file may not exists at first time but may
-            // create after a while, developer cannot watch it.
-            //
-            // FIXME: Can we always allow to watch a path, even file not
-            // found at this path?
-            if let Err(e) = fs::metadata(&root.absolute) {
-                data_builder.emitter.emit_io_err(e, Some(&root.requested));
-                return None;
-            }
+            // This is intentionally different from *POLLING* a watch: when a
+            // watched path disappears, the existing watch is kept and io errors
+            // encountered while scanning are emitted as events instead.
+            fs::metadata(&root.absolute)
+                .map_err(|e| crate::Error::io_watch(e).add_path(root.requested.clone()))?;
 
             let all_path_data = Self::scan_all_path_data(
                 data_builder,
                 root.absolute.clone(),
                 root.requested.clone(),
+                root.user_data,
                 is_recursive,
                 follow_symlinks,
                 true,
             )
             .collect();
 
-            Some(Self {
+            Ok(Self {
                 root: root.absolute,
                 requested_root: root.requested,
+                user_data: root.user_data,
                 is_recursive,
                 follow_symlinks,
                 all_path_data,
@@ -248,6 +240,7 @@ mod data {
                 data_builder,
                 self.root.clone(),
                 self.requested_root.clone(),
+                self.user_data,
                 self.is_recursive,
                 self.follow_symlinks,
                 false,
@@ -264,11 +257,14 @@ mod data {
                 };
 
                 if let Some(event_kind) = event_kind {
-                    let event = Event::new(event_kind).add_path(reported_path(
+                    let mut event = Event::new(event_kind).add_path(reported_path(
                         &self.root,
                         &self.requested_root,
                         &path,
                     ));
+                    if let Some(user_data) = self.user_data {
+                        event = event.set_user_data(user_data);
+                    }
                     data_builder.emitter.emit_ok(event);
                 }
             }
@@ -286,11 +282,14 @@ mod data {
                 let old_path_data = self.all_path_data.remove(&path);
 
                 if let Some(event_kind) = PathData::compare_to_kind(old_path_data.as_ref(), None) {
-                    let event = Event::new(event_kind).add_path(reported_path(
+                    let mut event = Event::new(event_kind).add_path(reported_path(
                         &self.root,
                         &self.requested_root,
                         &path,
                     ));
+                    if let Some(user_data) = self.user_data {
+                        event = event.set_user_data(user_data);
+                    }
                     data_builder.emitter.emit_ok(event);
                 }
             }
@@ -305,6 +304,7 @@ mod data {
             data_builder: &'_ DataBuilder,
             root: PathBuf,
             requested_root: PathBuf,
+            user_data: Option<u64>,
             is_recursive: bool,
             follow_symlinks: bool,
             // whether this is an initial scan, used only for events
@@ -319,7 +319,7 @@ mod data {
                 .follow_links(follow_symlinks)
                 .max_depth(Self::dir_scan_depth(is_recursive))
                 .into_iter()
-                .filter_map(|entry_res| match entry_res {
+                .filter_map(move |entry_res| match entry_res {
                     Ok(entry) => Some(entry),
                     Err(err) => {
                         log::warn!("walkdir error scanning {err:?}");
@@ -327,11 +327,15 @@ mod data {
                         if let Some(io_error) = err.io_error() {
                             // clone an io::Error, so we have to create a new one.
                             let new_io_error = io::Error::new(io_error.kind(), err.to_string());
-                            data_builder.emitter.emit_io_err(new_io_error, err.path());
+                            data_builder
+                                .emitter
+                                .emit_io_err(new_io_error, err.path(), user_data);
                         } else {
                             let crate_err =
                                 crate::Error::new(crate::ErrorKind::Generic(err.to_string()));
-                            data_builder.emitter.emit(Err(crate_err));
+                            data_builder
+                                .emitter
+                                .emit(Err(crate_err.set_user_data_opt(user_data)));
                         }
                         None
                     }
@@ -357,7 +361,7 @@ mod data {
                     Err(e) => {
                         // emit event.
                         let path = entry.into_path();
-                        data_builder.emitter.emit_io_err(e, Some(path));
+                        data_builder.emitter.emit_io_err(e, Some(path), user_data);
 
                         None
                     }
@@ -404,19 +408,19 @@ mod data {
         /// Create a new `PathData`.
         fn new(data_builder: &DataBuilder, meta_path: &MetaPath) -> PathData {
             let metadata = meta_path.metadata();
-            let is_file = metadata.is_file();
+            let compare_contents = data_builder.compare_contents && metadata.is_file();
             let mut mtime = metadata.modified().map_or(0, system_time_to_nanos);
-            if !is_file || data_builder.compare_contents {
+            if metadata.is_dir() || compare_contents {
                 // Child changes update directory mtimes. Preserve the existing second precision for
                 // directories to avoid emitting a redundant directory event for every file event.
-                // Hashed watchers also retain second precision so content changes keep their
+                // Files with content comparison also retain second precision so changes keep their
                 // existing event classification.
                 mtime = mtime / NANOS_PER_SECOND * NANOS_PER_SECOND;
             }
 
             PathData {
                 mtime,
-                hash: if data_builder.compare_contents && is_file {
+                hash: if compare_contents {
                     content_hash(meta_path.path()).ok()
                 } else {
                     None
@@ -560,12 +564,12 @@ mod data {
         }
 
         /// Emit io error event.
-        fn emit_io_err<E, P>(&self, err: E, path: Option<P>)
+        fn emit_io_err<E, P>(&self, err: E, path: Option<P>, user_data: Option<u64>)
         where
             E: Into<io::Error>,
             P: Into<PathBuf>,
         {
-            let e = crate::Error::io(err.into());
+            let e = crate::Error::io(err.into()).set_user_data_opt(user_data);
             if let Some(path) = path {
                 self.emit(Err(e.add_path(path.into())));
             } else {
@@ -700,9 +704,6 @@ impl PollWatcher {
                     };
 
                     // HINT: Make sure always lock in the same order to avoid deadlock.
-                    //
-                    // FIXME: inconsistent: some place mutex poison cause panic,
-                    // some place just ignore.
                     let scan_res = {
                         let mut watches = watches.lock().unwrap_or_else(|e| e.into_inner());
                         let mut data_builder =
@@ -728,14 +729,12 @@ impl PollWatcher {
 
     /// Watch a path location.
     ///
-    /// QUESTION: this function never return an Error, is it as intend?
-    /// Please also consider the IO Error event problem.
-    fn watch_inner(&mut self, path: &Path, recursive_mode: RecursiveMode) -> crate::Result<()> {
-        let watch_path = WatchPath::new(path)?;
+    /// Return `Err(_)` if the path cannot be watched, e.g. because it does not
+    /// exist or its metadata cannot be read.
+    fn watch_inner(&mut self, path: &Path, config: crate::WatchPathConfig) -> crate::Result<()> {
+        let watch_path = WatchPath::new(path, config.user_data())?;
 
         // HINT: Make sure always lock in the same order to avoid deadlock.
-        //
-        // FIXME: inconsistent: some place mutex poison cause panic, some place just ignore.
         let mut watches = self.watches.lock().unwrap_or_else(|e| e.into_inner());
         let mut data_builder = self.data_builder.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -743,14 +742,11 @@ impl PollWatcher {
 
         let watch_data = data_builder.build_watch_data(
             watch_path.clone(),
-            recursive_mode.is_recursive(),
+            config.recursive_mode().is_recursive(),
             self.follow_sylinks,
-        );
+        )?;
 
-        // if create watch_data successful, add it to watching list.
-        if let Some(watch_data) = watch_data {
-            watches.insert(watch_path.absolute, watch_data);
-        }
+        watches.insert(watch_path.absolute, watch_data);
 
         Ok(())
     }
@@ -761,7 +757,6 @@ impl PollWatcher {
     fn unwatch_inner(&mut self, path: &Path) -> crate::Result<()> {
         let path = absolute_path(path)?;
 
-        // FIXME: inconsistent: some place mutex poison cause panic, some place just ignore.
         self.watches
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -778,7 +773,13 @@ impl Watcher for PollWatcher {
     }
 
     fn watch(&mut self, path: &Path, recursive_mode: RecursiveMode) -> crate::Result<()> {
-        self.watch_inner(path, recursive_mode)
+        self.watch_with(path, crate::WatchPathConfig::new(recursive_mode))
+    }
+
+    fn watch_with(&mut self, path: &Path, config: crate::WatchPathConfig) -> crate::Result<()> {
+        let user_data = config.user_data();
+        self.watch_inner(path, config)
+            .map_err(|err| err.set_user_data_opt(user_data))
     }
 
     fn unwatch(&mut self, path: &Path) -> crate::Result<()> {
@@ -786,7 +787,7 @@ impl Watcher for PollWatcher {
     }
 
     fn watched_paths(&self) -> crate::Result<Vec<(PathBuf, RecursiveMode)>> {
-        let watches = self.watches.lock().map_err(crate::Error::from)?;
+        let watches = self.watches.lock().unwrap_or_else(|e| e.into_inner());
         Ok(watches
             .values()
             .map(|watch| (watch.requested_root().to_path_buf(), watch.recursive_mode()))
@@ -831,6 +832,44 @@ mod tests {
     fn poll_watcher_is_send_and_sync() {
         fn check<T: Send + Sync>() {}
         check::<PollWatcher>();
+    }
+
+    #[test]
+    fn watch_nonexistent_path_returns_path_not_found() {
+        let tmpdir = testdir();
+        let path = tmpdir.path().join("does_not_exist");
+
+        let mut watcher = PollWatcher::new(|_| {}, Config::default()).expect("create watcher");
+        let err = watcher
+            .watch(&path, RecursiveMode::Recursive)
+            .expect_err("watching a nonexistent path must return an error");
+
+        assert!(matches!(err.kind, crate::ErrorKind::PathNotFound));
+        assert_eq!(err.paths, vec![path]);
+
+        let watched = watcher.watched_paths().expect("list watched paths");
+        assert!(
+            watched.is_empty(),
+            "a failed watch must not be registered, got {watched:?}"
+        );
+    }
+
+    #[test]
+    fn watch_existing_paths_succeed() {
+        let tmpdir = testdir();
+        let file = tmpdir.path().join("entry");
+        std::fs::write(&file, "contents").expect("write file");
+
+        let mut watcher = PollWatcher::new(|_| {}, Config::default()).expect("create watcher");
+        watcher
+            .watch(&file, RecursiveMode::NonRecursive)
+            .expect("watch existing file");
+        watcher
+            .watch(tmpdir.path(), RecursiveMode::Recursive)
+            .expect("watch existing directory");
+
+        let watched = watcher.watched_paths().expect("list watched paths");
+        assert_eq!(watched.len(), 2);
     }
 
     #[test]
@@ -888,20 +927,105 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn unwatch_with_poisoned_mutex_does_not_panic() {
+    fn detects_subsecond_symlink_mtime_changes() {
+        use std::{os::unix::fs::symlink, sync::mpsc};
+
+        use nix::{
+            fcntl::AT_FDCWD,
+            sys::{
+                stat::{UtimensatFlags, utimensat},
+                time::TimeSpec,
+            },
+        };
+
+        use crate::event::{Event, EventKind, MetadataKind, ModifyKind};
+
+        for compare_contents in [false, true] {
+            let tmpdir = testdir();
+            let path = tmpdir.path().join("link");
+            symlink("missing", &path).expect("create dangling symlink");
+
+            let set_mtime = |nanos| {
+                utimensat(
+                    AT_FDCWD,
+                    &path,
+                    &TimeSpec::UTIME_OMIT,
+                    &TimeSpec::new(1_700_000_000, nanos),
+                    UtimensatFlags::NoFollowSymlink,
+                )
+                .expect("set symlink mtime");
+            };
+            set_mtime(100_000_000);
+
+            let (tx, rx) = mpsc::channel();
+            let config = Config::default()
+                .with_manual_polling()
+                .with_follow_symlinks(false)
+                .with_compare_contents(compare_contents);
+            let mut watcher = PollWatcher::new(tx, config).expect("create watcher");
+            watcher
+                .watch(tmpdir.path(), RecursiveMode::Recursive)
+                .expect("watch directory");
+
+            for nanos in [200_000_000, 300_000_000] {
+                set_mtime(nanos);
+                watcher.poll_blocking().expect("poll for changes");
+
+                let events = rx
+                    .try_iter()
+                    .collect::<crate::Result<Vec<_>>>()
+                    .expect("watch events must not be errors");
+                assert_eq!(
+                    events,
+                    vec![
+                        Event::new(EventKind::Modify(ModifyKind::Metadata(
+                            MetadataKind::WriteTime,
+                        )))
+                        .add_path(path.clone())
+                    ],
+                    "compare_contents={compare_contents}, nanos={nanos}"
+                );
+            }
+
+            watcher.poll_blocking().expect("poll without changes");
+            assert!(rx.try_recv().is_err(), "unchanged symlink emitted an event");
+        }
+    }
+
+    #[test]
+    fn watch_operations_recover_poisoned_mutexes() {
         use std::{path::Path, sync::Arc};
 
-        let mut watcher = PollWatcher::new(|_| {}, Config::default()).expect("create watcher");
+        let tmpdir = testdir();
+        let mut watcher = PollWatcher::new(|_| {}, Config::default().with_manual_polling())
+            .expect("create watcher");
 
         let watches = Arc::clone(&watcher.watches);
-        let _ = std::thread::spawn(move || {
-            let _guard = watches.lock().expect("lock watches");
-            panic!("poison watches mutex for test");
+        let data_builder = Arc::clone(&watcher.data_builder);
+        std::thread::spawn(move || {
+            let _watches = watches.lock().expect("lock watches");
+            let _data_builder = data_builder.lock().expect("lock data builder");
+            panic!("poison polling mutexes for test");
         })
-        .join();
+        .join()
+        .expect_err("poisoning thread must panic");
 
-        // Ensure poisoned mutex recovery path does not panic in unwatch_inner.
+        watcher
+            .watch(tmpdir.path(), RecursiveMode::Recursive)
+            .expect("watch after poisoning");
+        assert_eq!(
+            watcher.watched_paths().expect("list after poisoning"),
+            vec![(tmpdir.path().to_path_buf(), RecursiveMode::Recursive)]
+        );
+        watcher.poll_blocking().expect("poll after poisoning");
+        watcher
+            .unwatch(tmpdir.path())
+            .expect("unwatch after poisoning");
+        assert!(watcher.watched_paths().unwrap().is_empty());
+
+        // Recovering a poisoned mutex still reports missing watches as errors.
         let result = watcher.unwatch_inner(Path::new("/path/that/is/not/watched"));
         assert!(result.is_err());
     }

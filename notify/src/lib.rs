@@ -1,10 +1,12 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 //! Cross-platform file system notification library
 //!
 //! # Installation
 //!
 //! ```toml
 //! [dependencies]
-//! notify = "9.0.0-rc.5"
+//! notify = "9.0.0-rc.7"
 //! ```
 //!
 //! If you want debounced events (or don't need them in-order), see [notify-debouncer-mini](https://docs.rs/notify-debouncer-mini/latest/notify_debouncer_mini/)
@@ -29,7 +31,7 @@
 //! Events are serializable via [serde](https://serde.rs) if the `serde` feature is enabled:
 //!
 //! ```toml
-//! notify = { version = "9.0.0-rc.5", features = ["serde"] }
+//! notify = { version = "9.0.0-rc.7", features = ["serde"] }
 //! ```
 //!
 //! # Known Problems
@@ -37,9 +39,21 @@
 //! ### Network filesystems
 //!
 //! Network mounted filesystems like NFS may not emit any events for notify to listen to.
-//! This applies especially to WSL programs watching windows paths ([issue #254](https://github.com/notify-rs/notify/issues/254)).
+//! In Linux programs running under WSL, [`RecommendedWatcher`] uses inotify.
+//! On WSL2, changes made by Windows applications to files on Windows filesystems (such as
+//! `/mnt/c/...`) may not produce inotify events, even when [`Watcher::watch`] succeeds.
+//! See [issue #254](https://github.com/notify-rs/notify/issues/254) and
+//! [microsoft/WSL#4739](https://github.com/microsoft/WSL/issues/4739).
 //!
-//! A workaround is the [`PollWatcher`] backend.
+//! A workaround is to use [`PollWatcher`] explicitly for paths affected by these limitations.
+//! Set the scan interval with [`Config::with_poll_interval`] (the default is 30 seconds).
+//! Shorter intervals reduce detection latency but increase filesystem I/O.
+//! Polling compares the state observed at each scan; changes that occur and are reverted between
+//! scans may be missed.
+//!
+//! If modification timestamps do not reliably reflect content changes, enable
+//! [`Config::with_compare_contents`] with `true`.
+//! This reads and hashes each file on every scan, increasing I/O and CPU usage.
 //!
 //! ### Docker with Linux on macOS M1
 //!
@@ -64,16 +78,87 @@
 //! filter out metadata-only events if they're not relevant (e.g. don't include
 //! `EventKindMask::MODIFY_META` in [`Config::with_event_kinds`]).
 //!
-//! ### Editor Behaviour
+//! ### Editor Behavior
 //!
 //! If you rely on precise events (Write/Delete/Create..), you will notice that the actual events
 //! can differ a lot between file editors. Some truncate the file on save, some create a new one and replace the old one.
-//! See also [this](https://github.com/notify-rs/notify/issues/247) and [this](https://github.com/notify-rs/notify/issues/113#issuecomment-281836995) issues for example.
+//! With inotify, a watch follows the file's inode, so replacing the file can stop notifications
+//! for subsequent saves.
 //!
-//! ### Parent folder deletion
+//! To observe subsequent saves after a file is replaced, watch its parent directory with
+//! [`RecursiveMode::NonRecursive`] and filter events whose [`Event::paths`] contain the target
+//! file's path. Check all paths in an event, since a rename event can include both the old and
+//! new paths.
+//! This relies on filesystem notifications; for the WSL2 limitation above, use [`PollWatcher`].
+//! See also [issue #247](https://github.com/notify-rs/notify/issues/247) and
+//! [issue #113](https://github.com/notify-rs/notify/issues/113#issuecomment-281836995).
 //!
-//! If you want to receive an event for a deletion of folder `b` for the path `/a/b/..`, you will have to watch its parent `/a`.
-//! See [here](https://github.com/notify-rs/notify/issues/403) for more details.
+//! ### Changes to watched paths
+//!
+//! Renaming, moving, or deleting a directly watched file or directory affects backends differently:
+//!
+//! | Backend | Rename / move | Delete | New item at original path |
+//! | --- | --- | --- | --- |
+//! | inotify | Old object, old paths | Watch ends | Rewatch required |
+//! | Windows (directory) | Old object, old paths | Watch ends | Rewatch required |
+//! | Windows (file) | Original path | Watch kept | Events possible |
+//! | FSEvents (macOS) | Original path | Watch kept | Events possible |
+//! | kqueue | Watch ends | Watch ends | Rewatch required |
+//! | [`PollWatcher`] | Original path | Watch kept | Detected on scan |
+//!
+//! Exact events depend on the filesystem and operation; see
+//! [issue #554](https://github.com/notify-rs/notify/issues/554).
+//! Windows may emit no event for a directory rename or move.
+//!
+//! To detect changes to `/a/b`, also watch `/a` with [`RecursiveMode::NonRecursive`] and
+//! recheck the target when the parent reports a change. Remove any surviving watch with
+//! [`Watcher::unwatch`] before watching the desired path again, once it exists.
+//! This assumes the parent stays in place; see [issue #403](https://github.com/notify-rs/notify/issues/403).
+//!
+//! For a fixed path that may disappear and return, use [`PollWatcher`]. The path must exist
+//! when registered; changes that occur and are reverted between scans can be missed.
+//!
+//! ### kqueue: event details
+//!
+//! kqueue does not identify the type of a deleted entry, and this backend does not cache it,
+//! so removal events use [`event::RemoveKind::Any`].
+//! A non-recursive directory watch reports changes to directory entries as events on the
+//! directory itself, without identifying the affected child. Watch individual files to receive
+//! their data changes, or use [`RecursiveMode::Recursive`] to track children.
+//! See [issue #644](https://github.com/notify-rs/notify/issues/644).
+//!
+//! Recursive watches discover new entries by scanning directories after a notification.
+//! Files created and removed between scans and intermediate paths in rapid renames can be missed.
+//! Descendants found while registering a newly created directory are watched, but do not receive
+//! individual creation events. Do not rely on receiving a separate event for every operation.
+//!
+//! ### kqueue: recursive watches and file descriptor limits
+//!
+//! The kqueue backend keeps an open file descriptor for each watched file and directory.
+//! Large recursive watches, including `/`, can exceed the process or system limit and fail
+//! with [`ErrorKind::MaxFilesWatch`]. On macOS, use FSEvents for large trees: keep the default
+//! features (or enable `macos_fsevent`) and do not enable `macos_kqueue`. Enabling `macos_kqueue`
+//! also changes [`RecommendedWatcher`] to kqueue, even when `macos_fsevent` is enabled.
+//!
+//! During a recursive kqueue watch, missing children are skipped. Other child errors, such as
+//! permission failures or symbolic link cycles, are sent to the event handler while the walk
+//! continues through the rest of the tree. A successful `watch()` can therefore leave some
+//! descendants unwatched; handle error events to detect incomplete coverage.
+//! Failure to watch or read the requested root, reaching the watch limit, or failure to register
+//! the watches returns an error from `watch()`. Already installed watches are not rolled back.
+//!
+//! Recursive kqueue watches skip FIFOs, sockets, and device files without reporting errors.
+//! Symbolic links to these special files are also skipped. Watching a special file directly
+//! returns an [`ErrorKind::Io`] error with [`std::io::ErrorKind::Unsupported`].
+//!
+//! When filesystem events trigger further watch additions, failures are sent to the event
+//! handler; reaching the watch limit stops the remaining additions in that batch.
+//! Repeated recoverable errors for the same known path are reported once per request or event
+//! batch. Later changes to the parent directory can retry failed entries and report errors again.
+//!
+//! See [issue #703](https://github.com/notify-rs/notify/issues/703),
+//! [issue #455](https://github.com/notify-rs/notify/issues/455), and
+//! [issue #596](https://github.com/notify-rs/notify/issues/596).
 //!
 //! ### Pseudo Filesystems like /proc, /sys
 //!
@@ -98,6 +183,13 @@
 //!
 //! When watching a very large amount of files, notify may fail to receive all events.
 //! For example the linux backend is documented to not be a 100% reliable source. See also issue [#412](https://github.com/notify-rs/notify/issues/412).
+//!
+//! ### Watching many paths on macOS
+//!
+//! Use [`Watcher::update_paths`] to register many paths in one batch. The FSEvents backend
+//! rebuilds its stream when adding a path that is not already covered by a recursive watch on
+//! the same volume. Adding N independent paths with separate [`Watcher::watch`] calls therefore
+//! registers O(N²) paths in total; a single batch rebuilds the stream only once.
 //!
 //! # Examples
 //!
@@ -144,7 +236,7 @@
 //! ## With different configurations
 //!
 //! It is possible to create several watchers with different configurations or implementations that
-//! all call the same event function. This can accommodate advanced behaviour or work around limits.
+//! all call the same event function. This can accommodate advanced behavior or work around limits.
 //!
 //! ```rust
 //! # use notify::{RecursiveMode, Result, Watcher};
@@ -258,6 +350,17 @@ pub mod poll;
 mod config;
 mod error;
 mod paths;
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly",
+    target_os = "ios",
+    all(target_os = "macos", feature = "macos_kqueue")
+))]
+mod walk;
 
 #[cfg(test)]
 pub(crate) mod test;
@@ -393,12 +496,11 @@ pub trait Watcher {
     /// independent watch is not added, and a single call to [`Watcher::unwatch`] removes the
     /// watched path.
     ///
-    /// On some platforms, if the `path` is renamed or removed while being watched, behaviour may
-    /// be unexpected. See discussions in [#165] and [#166]. If less surprising behaviour is wanted
-    /// one may non-recursively watch the _parent_ directory as well and manage related events.
+    /// To add many paths at once, use [`Watcher::update_paths`]. On macOS, this avoids rebuilding
+    /// the FSEvents stream for each path.
     ///
-    /// [#165]: https://github.com/notify-rs/notify/issues/165
-    /// [#166]: https://github.com/notify-rs/notify/issues/166
+    /// For rename, move, and deletion behavior, see
+    /// [Changes to watched paths](crate#changes-to-watched-paths).
     fn watch(&mut self, path: &Path, recursive_mode: RecursiveMode) -> Result<()>;
 
     /// Begin watching a path with per-path settings.
@@ -406,12 +508,15 @@ pub trait Watcher {
     /// Behaves like [`Watcher::watch`], with the options in `config` applied to this watch alone.
     /// Backends that do not implement a given option ignore it, so the default implementation
     /// applies only [`WatchPathConfig::recursive_mode`].
+    /// All built-in event-producing backends support [`WatchPathConfig::with_user_data`].
     ///
     /// # Errors
     ///
     /// Returns an error in the case that `path` does not exist or if adding the watch fails.
+    /// The error carries [`WatchPathConfig::user_data`] through [`Error::user_data`].
     fn watch_with(&mut self, path: &Path, config: WatchPathConfig) -> Result<()> {
         self.watch(path, config.recursive_mode())
+            .map_err(|err| err.set_user_data_opt(config.user_data()))
     }
 
     /// Stop watching a path.
@@ -426,6 +531,7 @@ pub trait Watcher {
     ///
     /// For some [`Watcher`] implementations this method provides better performance than multiple
     /// calls to [`Watcher::watch`] and [`Watcher::unwatch`] if you want to add/remove many paths at once.
+    /// In particular, the FSEvents backend on macOS rebuilds its stream only once for the whole batch.
     ///
     /// # Errors
     ///
@@ -458,6 +564,10 @@ pub trait Watcher {
     /// # Ok(())
     /// # }
     /// ```
+    #[expect(
+        clippy::result_large_err,
+        reason = "Keep the public error, including the failed PathOp and its configuration, unboxed"
+    )]
     fn update_paths(&mut self, ops: Vec<PathOp>) -> StdResult<(), UpdatePathsError> {
         update_paths(ops, |op| match op {
             PathOp::Watch(path, config) => self
@@ -469,7 +579,7 @@ pub trait Watcher {
 
     /// Configure the watcher at runtime.
     ///
-    /// See the [`Config`](config/struct.Config.html) struct for all configuration options.
+    /// See the [`Config`] struct for all configuration options.
     ///
     /// # Returns
     ///
@@ -560,6 +670,10 @@ where
     RecommendedWatcher::new(event_handler, Config::default())
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Match Watcher::update_paths without changing the public batch error type"
+)]
 pub(crate) fn update_paths<F>(ops: Vec<PathOp>, mut apply: F) -> StdResult<(), UpdatePathsError>
 where
     F: FnMut(PathOp) -> StdResult<(), (PathOp, Error)>,
@@ -571,7 +685,8 @@ where
                 source,
                 origin: Some(error_op),
                 remaining: iter.collect(),
-            });
+            }
+            .with_origin_user_data());
         }
     }
     Ok(())
